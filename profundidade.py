@@ -3,14 +3,23 @@ import numpy as np
 import os
 import glob
 import json
+import shutil
 
-PATH_TESTE = "testes/teste_01.json"
+PATH_TESTE = "testes/teste_04.json"
 
 base_name   = "frame"
 mapa_profundidade_dir  = "mapa_profundidade"
 retificacao_dir  = "retificacao"
-os.makedirs(mapa_profundidade_dir, exist_ok=True)
-os.makedirs(retificacao_dir, exist_ok=True)
+
+pastas_para_limpar = [
+    mapa_profundidade_dir, 
+    retificacao_dir
+]
+
+for pasta in pastas_para_limpar:
+    if os.path.exists(pasta):
+        shutil.rmtree(pasta)
+    os.makedirs(pasta, exist_ok=True) 
 
 def load_stereo_config(json_path):
     with open(json_path, "r", encoding="utf-8") as f:
@@ -162,9 +171,7 @@ for frame_num in range(frame_start, frame_end + 1):
     dispR = right_matcher.compute(grayR, grayL)
 
     filtered_disp = wls_filter.filter(dispL, grayL, None, dispR)
-
     filtered_disp = filtered_disp.astype(np.float32) / 16.0
-
     filtered_disp[filtered_disp < 0] = 0
 
     filtered_disp = cv2.bilateralFilter(filtered_disp, d=7, sigmaColor=25, sigmaSpace=25)
@@ -172,22 +179,17 @@ for frame_num in range(frame_start, frame_end + 1):
 
     H1_inv = np.linalg.inv(best_H1)
 
-    # volta para a imagem original
+    # Volta para a imagem original
     disp_original_view = cv2.warpPerspective(
         filtered_disp, H1_inv, size, flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-    # suavizar bordas 
+    # Suavizar bordas 
     disp_original_view = cv2.bilateralFilter(disp_original_view, d=7, sigmaColor=25, sigmaSpace=25)
 
-    # normaliza para visualização
+    # Normaliza para visualização
     disp_vis_original = normalize_disp(disp_original_view)
-
     cv2.imwrite(os.path.join(mapa_profundidade_dir, f"disparity_original_{frame_num:04d}.png"), disp_vis_original)
 
-    # cv2.imwrite(os.path.join(mapa_profundidade_dir, f"disparity_{frame_num:04d}.png"), disp_vis)
-
-    combined = np.hstack([ draw_horizontal_lines(rectL.copy()), draw_horizontal_lines(rectR.copy())])
-
+    combined = np.hstack([draw_horizontal_lines(rectL.copy()), draw_horizontal_lines(rectR.copy())])
     cv2.imwrite(os.path.join(retificacao_dir, f"{base_name}_{frame_num:04d}_rect.png"), combined)
-
