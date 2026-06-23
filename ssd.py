@@ -156,33 +156,6 @@ currentR = pts_right.copy()
 
 best_err, best_H1, best_H2 = rectification_error(currentL, currentR, size)
 
-while len(currentL) > 8:
-    candidate_err = best_err
-    candidate_idx = None
-
-    for i in range(len(currentL)):
-        err, H1, H2 = rectification_error(
-            np.delete(currentL, i, axis=0),
-            np.delete(currentR, i, axis=0),
-            size
-        )
-
-        if err < candidate_err:
-            candidate_err = err
-            candidate_idx = i
-            candidate_H1 = H1
-            candidate_H2 = H2
-
-    if candidate_idx is None:
-        break
-
-    currentL = np.delete(currentL, candidate_idx, axis=0)
-    currentR = np.delete(currentR, candidate_idx, axis=0)
-
-    best_err = candidate_err
-    best_H1 = candidate_H1
-    best_H2 = candidate_H2
-
 print(len(currentL), "pontos finais escolhidos")
 print("Erro final:", best_err)
 
@@ -204,23 +177,18 @@ for frame_num in range(frame_start, frame_end + 1):
     grayR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY)
 
     #janela 3x3
-    disp = compute_disparity_ssd_fast(grayL, grayR, num_disparities=10, win_size=15)
+    disp = compute_disparity_ssd_fast(grayL, grayR, num_disparities=8, win_size=15)
 
     # para reduzir ruído
     disp = cv2.bilateralFilter(disp, d=7, sigmaColor=25, sigmaSpace=25)
 
-    disp_vis = normalize_disp(disp)
-
     #volta para a perspectiva original
     H1_inv = np.linalg.inv(best_H1)
-    disp_original_view = cv2.warpPerspective(
-        disp, H1_inv, size, flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    disp_original_view = cv2.warpPerspective(disp, H1_inv, size, flags=cv2.INTER_LINEAR,
+                                             borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-    #suavizar bordas
+    #suavizar bordas e normaliza para visualização
     disp_original_view = cv2.bilateralFilter(disp_original_view, d=7, sigmaColor=25, sigmaSpace=25)
-
-    # normaliza para visualização
     disp_vis_original = normalize_disp(disp_original_view)
     cv2.imwrite(os.path.join(mapa_profundidade_dir, f"disparity_original_{frame_num:04d}.png"), disp_vis_original)
 
