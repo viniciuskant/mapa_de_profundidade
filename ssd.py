@@ -38,29 +38,20 @@ def rectification_error(ptsL, ptsR, size):
     if len(ptsL) < 8:
         return np.inf, None, None
 
-    F, mask = cv2.findFundamentalMat(
-        ptsL, ptsR,
-        cv2.FM_RANSAC,
-        1.0, 0.99
-    )
-
+    F, mask = cv2.findFundamentalMat(ptsL, ptsR, cv2.FM_RANSAC, 1.0, 0.99)
     if F is None:
         return np.inf, None, None
 
     ptsL = ptsL[mask.ravel() == 1]
     ptsR = ptsR[mask.ravel() == 1]
 
-    ok, H1, H2 = cv2.stereoRectifyUncalibrated(
-        ptsL, ptsR, F, imgSize=size
-    )
+    ok, H1, H2 = cv2.stereoRectifyUncalibrated(ptsL, ptsR, F, imgSize=size)
 
     if not ok:
         return np.inf, None, None
 
     pL = cv2.perspectiveTransform(ptsL.reshape(-1, 1, 2), H1).reshape(-1, 2)
-
     pR = cv2.perspectiveTransform(ptsR.reshape(-1, 1, 2), H2).reshape(-1, 2)
-
     err = np.mean(np.abs(pL[:, 1] - pR[:, 1]))
 
     return err, H1, H2
@@ -82,6 +73,68 @@ def normalize_disp(disp):
         disp = (disp - mn) / (mx - mn + 1e-6)
         disp *= 255
     return disp.astype(np.uint8)
+
+def box_sum_from_integral(integral, half, h, w):
+    return (integral[2*half+1:h+1, 2*half+1:w+1] -
+            integral[0:h-2*half, 2*half+1:w+1] -
+            integral[2*half+1:h+1, 0:w-2*half] +
+            integral[0:h-2*half, 0:w-2*half])
+
+def compute_disparity_ssd_fast(left, right, num_disparities=128, win_size=3):
+    left = left.astype(np.float32)
+    right = right.astype(np.float32)
+    h, w = left.shape
+    half = win_size // 2
+
+    # imagem integral
+    L2 = left ** 2
+    integral_L2 = cv2.integral(L2, sdepth=cv2.CV_64F)
+    sum_L2_all = box_sum_from_integral(integral_L2, half, h, w)
+
+    # init mapa e custo mínimo
+    disp_map = np.zeros((h, w), dtype=np.float32)
+    best_cost = np.full((h, w), np.inf, dtype=np.float64)
+
+    # apenas centros com janela totalmente dentro da imagem esquerda
+    y_start, y_end = half, h - half
+    x_start, x_end = half, w - half
+
+    for d in range(num_disparities):
+        # desloca a imagem direita para a esquerda em 'd' pixels
+        # formula usa I_R(u - d, v)
+        # u < d, a janela sairia da borda
+        R_shift = np.zeros_like(right)
+        if d == 0:
+            R_shift = right.copy()
+        else:
+            R_shift[:, d:] = right[:, :-d] 
+
+        # I_R^2 e I_L * I_R
+        R2_shift = R_shift ** 2
+        LR = left * R_shift
+
+        # disparidade atual
+        integral_R2 = cv2.integral(R2_shift, sdepth=cv2.CV_64F)
+        integral_LR = cv2.integral(LR, sdepth=cv2.CV_64F)
+
+        # soma das janelas para todos os centros válidos
+        sum_R2_all = box_sum_from_integral(integral_R2, half, h, w)
+        sum_LR_all = box_sum_from_integral(integral_LR, half, h, w)
+
+        #sum(L^2) + sum(R^2) - 2*sum(L*R)
+        cost = sum_L2_all + sum_R2_all - 2.0 * sum_LR_all
+
+        if d > 0: # descarta disparidades inválidas
+            cost[:, :d] = np.inf 
+
+        # atualiza o mapa de disparidade (mantém o menor custo)
+        region_cost = best_cost[half:h-half, half:w-half]
+        mask = cost < region_cost
+        region_cost[mask] = cost[mask]
+        disp_region = disp_map[half:h-half, half:w-half]
+        disp_region[mask] = float(d)
+
+    return disp_map
 
 cfg = load_stereo_config(PATH_TESTE)
 
@@ -133,24 +186,6 @@ while len(currentL) > 8:
 print(len(currentL), "pontos finais escolhidos")
 print("Erro final:", best_err)
 
-stereo = cv2.StereoSGBM_create(
-    minDisparity=0,
-    numDisparities=128,
-    blockSize=11,
-    P1=8 * 3 * 11**2,
-    P2=32 * 3 * 11**2,
-    disp12MaxDiff=1,
-    uniquenessRatio=10,
-    speckleWindowSize=100,
-    speckleRange=32
-)
-
-right_matcher = cv2.ximgproc.createRightMatcher(stereo)
-
-wls_filter = cv2.ximgproc.createDisparityWLSFilter(stereo)
-wls_filter.setLambda(8000)
-wls_filter.setSigmaColor(1.5)
-
 for frame_num in range(frame_start, frame_end + 1):
     fname = f"{base_name}_{frame_num:04d}.jpg"
     print(f"Processando {fname}")
@@ -161,33 +196,31 @@ for frame_num in range(frame_start, frame_end + 1):
     if imgL is None or imgR is None:
         continue
 
+    # retificação
     rectL = cv2.warpPerspective(imgL, best_H1, size)
     rectR = cv2.warpPerspective(imgR, best_H2, size)
 
     grayL = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY)
     grayR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY)
 
-    dispL = stereo.compute(grayL, grayR)
-    dispR = right_matcher.compute(grayR, grayL)
+    #janela 3x3
+    disp = compute_disparity_ssd_fast(grayL, grayR, num_disparities=10, win_size=15)
 
-    filtered_disp = wls_filter.filter(dispL, grayL, None, dispR)
-    filtered_disp = filtered_disp.astype(np.float32) / 16.0
-    filtered_disp[filtered_disp < 0] = 0
+    # para reduzir ruído
+    disp = cv2.bilateralFilter(disp, d=7, sigmaColor=25, sigmaSpace=25)
 
-    filtered_disp = cv2.bilateralFilter(filtered_disp, d=7, sigmaColor=25, sigmaSpace=25)
-    disp_vis = normalize_disp(filtered_disp)
+    disp_vis = normalize_disp(disp)
 
+    #volta para a perspectiva original
     H1_inv = np.linalg.inv(best_H1)
-
-    # Volta para a imagem original
     disp_original_view = cv2.warpPerspective(
-        filtered_disp, H1_inv, size, flags=cv2.INTER_LINEAR,
+        disp, H1_inv, size, flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-    # Suavizar bordas 
+    #suavizar bordas
     disp_original_view = cv2.bilateralFilter(disp_original_view, d=7, sigmaColor=25, sigmaSpace=25)
 
-    # Normaliza para visualização
+    # normaliza para visualização
     disp_vis_original = normalize_disp(disp_original_view)
     cv2.imwrite(os.path.join(mapa_profundidade_dir, f"disparity_original_{frame_num:04d}.png"), disp_vis_original)
 

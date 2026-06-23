@@ -90,7 +90,7 @@ class PointSelector:
 
         print("\n=== Coordenadas finais ===")
         for i, (x, y) in enumerate(self.points):
-            print(f"P{i}: ({x:.6f}, {y:.6f})")
+            print(f"[{x:.0f}, {y:.0f}],")
 
 
 def main():
